@@ -29,6 +29,9 @@ class WCPAsyncClient:
         self.reader = None
         self.writer = None
         self.is_connected = False
+        self.data_ready = asyncio.Event()
+
+        self.item_ids = []
 
     async def connect(self):
         try:
@@ -58,6 +61,16 @@ class WCPAsyncClient:
         await self.writer.drain()
         logger.info(f"Sent {payload}")
 
+    async def handle_response(self, message):
+        m_type = message.get("type")
+        cmd = message.get("command")
+
+        if m_type == "response":
+            match cmd:
+                case "get_item_list":
+                    self.item_ids = message.get("ids", [])
+            self.data_ready.set()
+
     async def listen(self):
         try:
             while self.is_connected:
@@ -65,6 +78,7 @@ class WCPAsyncClient:
                 if not data:
                     break
                 message = json.loads(data[:-1].decode("utf-8"))
+                await self.handle_response(message)
                 logger.info(f"Received {message}")
         except asyncio.IncompleteReadError:
             pass
@@ -77,6 +91,18 @@ class WCPAsyncClient:
             await self.writer.wait_closed()
         self.is_connected = False
 
+    async def get_item_info(self, item_ids: list):
+        payload = {
+            "type": WcpMessageType.COMMAND.value,
+            "command": "get_item_info",
+            "ids": item_ids,
+        }
+        await self.send_json(payload)
+
+    async def get_item_list(self):
+        payload = {"type": WcpMessageType.COMMAND.value, "command": "get_item_list"}
+        await self.send_json(payload)
+
 
 async def main():
     client = WCPAsyncClient()
@@ -85,6 +111,12 @@ async def main():
         listener_task = asyncio.create_task(client.listen())
 
         await client.send_greeting()
+        client.data_ready.clear()
+        await client.get_item_list()
+        await client.data_ready.wait()
+
+        await client.get_item_info(client.item_ids)
+
         await asyncio.sleep(2)
         await client.close()
         listener_task.cancel()
